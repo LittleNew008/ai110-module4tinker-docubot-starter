@@ -11,6 +11,19 @@ import os
 import re
 import glob
 
+# Common words that say nothing about the topic of a question. They are
+# ignored when scoring, otherwise "the" or "is" alone could make an
+# unrelated section look relevant.
+STOP_WORDS = frozenset(
+    "a an and any all are as at be by do does for how i in is it of on or "
+    "our so that the there these this to was what when where which who with".split()
+)
+
+# Evidence threshold: a section only counts as relevant if the topic words
+# from the query appear in it at least this many times. A single stray match
+# is more likely coincidence than an answer.
+MIN_SCORE = 2
+
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
         """
@@ -23,8 +36,11 @@ class DocuBot:
         # Load documents into memory
         self.documents = self.load_documents()  # List of (filename, text)
 
-        # Build a retrieval index (implemented in Phase 1)
-        self.index = self.build_index(self.documents)
+        # Split documents into heading sections, the unit of retrieval
+        self.sections = self.split_into_sections(self.documents)  # List of (filename, text)
+
+        # Build a retrieval index over the sections (implemented in Phase 1)
+        self.index = self.build_index(self.sections)
 
     # -----------------------------------------------------------
     # Document Loading
@@ -46,6 +62,34 @@ class DocuBot:
         return docs
 
     # -----------------------------------------------------------
+    # Section Splitting
+    # -----------------------------------------------------------
+
+    @staticmethod
+    def split_into_sections(documents):
+        """
+        Splits each document at its markdown headings (lines starting with #).
+        A section is a heading plus everything up to the next heading.
+        Any text before the first heading becomes its own section.
+        Returns a list of tuples: (filename, section_text)
+        """
+        sections = []
+        for filename, text in documents:
+            current = []
+            in_fence = False
+            for line in text.splitlines():
+                if line.strip().startswith("```"):
+                    in_fence = not in_fence
+                is_heading = not in_fence and re.match(r"#{1,6}\s", line)
+                if is_heading and current:
+                    sections.append((filename, "\n".join(current).strip()))
+                    current = []
+                current.append(line)
+            if current:
+                sections.append((filename, "\n".join(current).strip()))
+        return [(f, s) for f, s in sections if s]
+
+    # -----------------------------------------------------------
     # Index Construction (Phase 1)
     # -----------------------------------------------------------
 
@@ -60,22 +104,23 @@ class DocuBot:
     def build_index(self, documents):
         """
         TODO (Phase 1):
-        Build a tiny inverted index mapping lowercase words to the documents
-        they appear in.
+        Build a tiny inverted index mapping lowercase words to the sections
+        they appear in. `documents` is a list of (filename, text) pairs; each
+        pair is one section, and the index stores its position in that list.
 
         Example structure:
         {
-            "token": ["AUTH.md", "API_REFERENCE.md"],
-            "database": ["DATABASE.md"]
+            "token": [3, 7],
+            "database": [12]
         }
 
         Keep this simple: split on whitespace, lowercase tokens,
         ignore punctuation if needed.
         """
         index = {}
-        for filename, text in documents:
+        for position, (_, text) in enumerate(documents):
             for word in set(self.tokenize(text)):
-                index.setdefault(word, []).append(filename)
+                index.setdefault(word, []).append(position)
         return index
 
     # -----------------------------------------------------------
@@ -91,8 +136,10 @@ class DocuBot:
         - Convert query into lowercase words
         - Count how many appear in the text
         - Return the count as the score
+
+        Stop words are dropped from the query first, so only topic words count.
         """
-        query_words = set(self.tokenize(query))
+        query_words = set(self.tokenize(query)) - STOP_WORDS
         return sum(1 for word in self.tokenize(text) if word in query_words)
 
     def retrieve(self, query, top_k=3):
@@ -100,19 +147,23 @@ class DocuBot:
         TODO (Phase 1):
         Use the index and scoring function to select top_k relevant document snippets.
 
-        Return a list of (filename, text) sorted by score descending.
+        Each snippet is one heading section of a document, not the whole file.
+        Return a list of (filename, section_text) sorted by score descending.
+
+        Sections scoring below MIN_SCORE are not evidence, so they are dropped.
+        If nothing is left, this returns [] and both answer modes reply
+        "I do not know based on these docs." (RAG mode never calls the LLM).
         """
-        # Use the index to narrow down to documents sharing at least one word
+        # Use the index to narrow down to sections sharing at least one topic word
         candidates = set()
-        for word in set(self.tokenize(query)):
+        for word in set(self.tokenize(query)) - STOP_WORDS:
             candidates.update(self.index.get(word, []))
 
         results = []
-        for filename, text in self.documents:
-            if filename not in candidates:
-                continue
+        for position in sorted(candidates):
+            filename, text = self.sections[position]
             score = self.score_document(query, text)
-            if score > 0:
+            if score >= MIN_SCORE:
                 results.append((score, filename, text))
 
         results.sort(key=lambda item: item[0], reverse=True)
