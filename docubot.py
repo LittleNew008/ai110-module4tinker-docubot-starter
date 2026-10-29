@@ -8,6 +8,7 @@ Core DocuBot class responsible for:
 """
 
 import os
+import re
 import glob
 
 class DocuBot:
@@ -48,6 +49,14 @@ class DocuBot:
     # Index Construction (Phase 1)
     # -----------------------------------------------------------
 
+    @staticmethod
+    def tokenize(text):
+        """
+        Lowercases text and splits it into words, dropping punctuation.
+        Underscores are kept so names like AUTH_SECRET_KEY stay whole.
+        """
+        return re.findall(r"[a-z0-9_]+", text.lower())
+
     def build_index(self, documents):
         """
         TODO (Phase 1):
@@ -64,7 +73,9 @@ class DocuBot:
         ignore punctuation if needed.
         """
         index = {}
-        # TODO: implement simple indexing
+        for filename, text in documents:
+            for word in set(self.tokenize(text)):
+                index.setdefault(word, []).append(filename)
         return index
 
     # -----------------------------------------------------------
@@ -81,8 +92,8 @@ class DocuBot:
         - Count how many appear in the text
         - Return the count as the score
         """
-        # TODO: implement scoring
-        return 0
+        query_words = set(self.tokenize(query))
+        return sum(1 for word in self.tokenize(text) if word in query_words)
 
     def retrieve(self, query, top_k=3):
         """
@@ -91,9 +102,21 @@ class DocuBot:
 
         Return a list of (filename, text) sorted by score descending.
         """
+        # Use the index to narrow down to documents sharing at least one word
+        candidates = set()
+        for word in set(self.tokenize(query)):
+            candidates.update(self.index.get(word, []))
+
         results = []
-        # TODO: implement retrieval logic
-        return results[:top_k]
+        for filename, text in self.documents:
+            if filename not in candidates:
+                continue
+            score = self.score_document(query, text)
+            if score > 0:
+                results.append((score, filename, text))
+
+        results.sort(key=lambda item: item[0], reverse=True)
+        return [(filename, text) for _, filename, text in results[:top_k]]
 
     # -----------------------------------------------------------
     # Answering Modes
